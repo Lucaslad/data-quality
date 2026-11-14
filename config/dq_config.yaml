@@ -1,6 +1,22 @@
 # ==============================================================================
 # Configuração do Motor de Data Quality (Local / AWS Glue)
-# Permite habilitar/desabilitar bases, colunas e checks individualmente.
+#
+# Modelo Híbrido (Auto-Learn + Override Opcional):
+# Por padrão (`"auto"`), o motor aprende SOZINHO todas as métricas e regras a partir
+# do histórico de partições e das fotografias na camada Bronze/Silver:
+#   1. Chaves primárias (auto-descoberta de colunas identificadoras 100% únicas).
+#   2. Volumetria histórica (mediana, MAD e tolerância de desvio relativo aprendida).
+#   3. Evolução entre fotografias (quais colunas evoluem no passado vs. imutáveis).
+#   4. Consistência data vs. partição (quais datas pertencem estritamente à safra).
+#   5. Maturação de datas (quais datas são eventos diários, lag de estabilização,
+#      curva por lag, janela de avaliação e tolerância de desvio).
+#   6. Completude (limite máximo de nulos aprendido por coluna).
+#   7. Domínio categórico (vocabulário recorrente válido e mix histórico de categorias).
+#   8. Intervalo numérico (limites [min, max] aprendidos de partições estáveis).
+#   9. Formato / Regex (inferência de máscara estrutural como CPF e dígitos repetidos).
+#
+# Caso deseje travar uma regra fixa de contrato para alguma coluna específica,
+# basta substituir `"auto"` pelo dicionário/valor explícito correspondente.
 # ==============================================================================
 
 configuracoes_gerais:
@@ -10,309 +26,181 @@ configuracoes_gerais:
 
 tabelas:
   # ----------------------------------------------------------------------------
-  # 1. Base Mensal Limpa (Abertura de Conta / Faturas / Chave Pix com atraso normal de 3 dias)
+  # 1. Base Mensal Limpa (Abertura de Conta / Faturas / Chave Pix com atraso de 3 dias)
   # ----------------------------------------------------------------------------
   tabela_particao_mensal:
     ativo: true
-    descricao: "Base mensal de clientes (partição = anomes de abertura), com coluna dt_cadastro_chave_pix que reflete em até 3 dias"
+    descricao: "Base mensal de clientes (partição = anomes de abertura), com aprendizado 100% automático"
     caminho_relativo: "tabela_particao_mensal"
     coluna_particao: "anomes"
     tipo_particao: "mensal"
-    chaves_primarias:
-      - "id_fatura"
+    chaves_primarias: "auto"
     checks:
       particao:
         volumetria_historica:
           ativo: true
-          desvio_relativo_max: 0.30
-          z_score_robusto_max: 3.0
+          desvio_relativo_max: "auto"
+          z_score_robusto_max: "auto"
         evolucao_fotografias:
           ativo: true
-          permitir_atualizacao_particoes_passadas: true
-          queda_max_registros_pct: 0.0
-          colunas_evolucao_positiva:
-            - "dt_cadastro_chave_pix"
+          permitir_atualizacao_particoes_passadas: "auto"
+          queda_max_registros_pct: "auto"
+          colunas_evolucao_positiva: "auto"
         consistencia_data_particao:
           ativo: true
-          colunas_data_particao:
-            - "dt_fechamento"
-            - "dt_abertura_conta"
+          colunas_data_particao: "auto"
       maturacao_datas:
-        ativo: true
-        # O motor aprende sozinho quantos dias de atraso (lag de estabilização)
-        # cada coluna possui comparando a evolução da mesma data entre fotografias.
-        colunas:
-          dt_cadastro_chave_pix:
-            ativo: true
-            janela_avaliacao_dias: 8
-            escopo_particoes: "todas"
-            tolerancia_desvio_curva: 0.35
-            min_fotos_aprendizado: 2
-          dt_abertura_conta:
-            ativo: true
-            janela_avaliacao_dias: 5
-            escopo_particoes: "todas"
-            tolerancia_desvio_curva: 0.35
-            min_fotos_aprendizado: 2
+        ativo: "auto"
+        colunas: "auto"
       colunas:
         completude:
           ativo: true
-          limites_nulos_pct:
-            id_fatura: 0.0
-            id_cliente: 0.0
-            cpf: 0.0
-            uf: 0.0
-            segmento: 0.0
-            score_credito: 0.0
-            valor_fatura: 0.0
-            qtd_transacoes: 0.0
-            status_pagamento: 0.0
-            dt_abertura_conta: 0.0
-            dt_fechamento: 0.0
-            dt_cadastro_chave_pix: 0.25
+          limites_nulos_pct: "auto"
         unicidade:
           ativo: true
           verificar_chave_primaria: true
           verificar_linha_completa: true
         dominio:
           ativo: true
-          regras:
-            uf: ["SP", "RJ", "MG", "PR", "RS", "BA", "SC", "DF"]
-            segmento: ["VAREJO", "UNICLASS", "PERSONNALITE", "EMPRESAS"]
-            status_pagamento: ["PAGO", "EM_ABERTO", "ATRASADO"]
+          regras: "auto"
         intervalo_numerico:
           ativo: true
-          regras:
-            valor_fatura:
-              min: 0.01
-              max: 100000.0
-            score_credito:
-              min: 300
-              max: 1000
-            qtd_transacoes:
-              min: 0
-              max: 1000
+          regras: "auto"
         formato_regex:
           ativo: true
-          regras:
-            cpf:
-              padrao: "^\\d{11}$"
-              rejeitar_digitos_repetidos: true
+          regras: "auto"
 
   # ----------------------------------------------------------------------------
   # 2. Base Mensal com Anomalias
   # ----------------------------------------------------------------------------
   tabela_particao_mensal_anomalias:
     ativo: true
-    descricao: "Base mensal com anomalias injetadas (partição, colunas e falha de maturação em dt_cadastro_chave_pix)"
+    descricao: "Base mensal com anomalias injetadas (avaliada com regras 100% auto-aprendidas)"
     caminho_relativo: "tabela_particao_mensal_anomalias"
     coluna_particao: "anomes"
     tipo_particao: "mensal"
-    chaves_primarias:
-      - "id_fatura"
+    chaves_primarias: "auto"
     checks:
       particao:
         volumetria_historica:
           ativo: true
-          desvio_relativo_max: 0.30
-          z_score_robusto_max: 3.0
+          desvio_relativo_max: "auto"
+          z_score_robusto_max: "auto"
         evolucao_fotografias:
           ativo: true
-          permitir_atualizacao_particoes_passadas: true
-          queda_max_registros_pct: 0.0
-          colunas_evolucao_positiva:
-            - "dt_cadastro_chave_pix"
+          permitir_atualizacao_particoes_passadas: "auto"
+          queda_max_registros_pct: "auto"
+          colunas_evolucao_positiva: "auto"
         consistencia_data_particao:
           ativo: true
-          colunas_data_particao:
-            - "dt_fechamento"
-            - "dt_abertura_conta"
+          colunas_data_particao: "auto"
       maturacao_datas:
-        ativo: true
-        # O motor aprende sozinho quantos dias de atraso (lag de estabilização)
-        # cada coluna possui comparando a evolução da mesma data entre fotografias.
-        colunas:
-          dt_cadastro_chave_pix:
-            ativo: true
-            janela_avaliacao_dias: 8
-            escopo_particoes: "todas"
-            tolerancia_desvio_curva: 0.35
-            min_fotos_aprendizado: 2
-          dt_abertura_conta:
-            ativo: true
-            janela_avaliacao_dias: 5
-            escopo_particoes: "todas"
-            tolerancia_desvio_curva: 0.35
-            min_fotos_aprendizado: 2
+        ativo: "auto"
+        colunas: "auto"
       colunas:
         completude:
           ativo: true
-          limites_nulos_pct:
-            id_fatura: 0.0
-            id_cliente: 0.0
-            cpf: 0.0
-            uf: 0.0
-            segmento: 0.0
-            score_credito: 0.0
-            valor_fatura: 0.0
-            qtd_transacoes: 0.0
-            status_pagamento: 0.0
-            dt_abertura_conta: 0.0
-            dt_fechamento: 0.0
-            dt_cadastro_chave_pix: 0.25
+          limites_nulos_pct: "auto"
         unicidade:
           ativo: true
           verificar_chave_primaria: true
           verificar_linha_completa: true
         dominio:
           ativo: true
-          regras:
-            uf: ["SP", "RJ", "MG", "PR", "RS", "BA", "SC", "DF"]
-            segmento: ["VAREJO", "UNICLASS", "PERSONNALITE", "EMPRESAS"]
-            status_pagamento: ["PAGO", "EM_ABERTO", "ATRASADO"]
+          regras: "auto"
         intervalo_numerico:
           ativo: true
-          regras:
-            valor_fatura:
-              min: 0.01
-              max: 100000.0
-            score_credito:
-              min: 300
-              max: 1000
-            qtd_transacoes:
-              min: 0
-              max: 1000
+          regras: "auto"
         formato_regex:
           ativo: true
-          regras:
-            cpf:
-              padrao: "^\\d{11}$"
-              rejeitar_digitos_repetidos: true
+          regras: "auto"
 
   # ----------------------------------------------------------------------------
   # 3. Base Diária Limpa (Transações Financeiras)
   # ----------------------------------------------------------------------------
   tabela_particao_diaria:
     ativo: true
-    descricao: "Base diária limpa de transações financeiras (anomesdia)"
+    descricao: "Base diária limpa de transações financeiras (anomesdia), com aprendizado 100% automático"
     caminho_relativo: "tabela_particao_diaria"
     coluna_particao: "anomesdia"
     tipo_particao: "diaria"
-    chaves_primarias:
-      - "id_transacao"
+    chaves_primarias: "auto"
     checks:
       particao:
         volumetria_historica:
           ativo: true
-          desvio_relativo_max: 0.30
-          z_score_robusto_max: 3.0
+          desvio_relativo_max: "auto"
+          z_score_robusto_max: "auto"
         evolucao_fotografias:
           ativo: true
-          permitir_atualizacao_particoes_passadas: false
-          queda_max_registros_pct: 0.0
-          colunas_evolucao_positiva: []
+          permitir_atualizacao_particoes_passadas: "auto"
+          queda_max_registros_pct: "auto"
+          colunas_evolucao_positiva: "auto"
         consistencia_data_particao:
           ativo: true
-          colunas_data_particao:
-            - "dt_transacao"
+          colunas_data_particao: "auto"
       maturacao_datas:
-        ativo: false
-        colunas: {}
+        ativo: "auto"
+        colunas: "auto"
       colunas:
         completude:
           ativo: true
-          limites_nulos_pct:
-            id_transacao: 0.0
-            id_cliente: 0.0
-            tipo_transacao: 0.0
-            canal: 0.0
-            valor_transacao: 0.0
-            moeda: 0.0
-            status_transacao: 0.0
-            uf_origem: 0.0
-            dt_transacao: 0.0
+          limites_nulos_pct: "auto"
         unicidade:
           ativo: true
           verificar_chave_primaria: true
           verificar_linha_completa: true
         dominio:
           ativo: true
-          regras:
-            tipo_transacao: ["PIX", "CARTAO_CREDITO", "CARTAO_DEBITO", "TED", "BOLETO"]
-            canal: ["APP", "INTERNET_BANKING", "CAIXA_ELETRONICO", "AGENCIA"]
-            moeda: ["BRL"]
-            status_transacao: ["APROVADA", "RECUSADA", "ESTORNADA"]
-            uf_origem: ["SP", "RJ", "MG", "PR", "RS", "BA", "SC", "DF"]
+          regras: "auto"
         intervalo_numerico:
           ativo: true
-          regras:
-            valor_transacao:
-              min: 0.01
-              max: 100000.0
+          regras: "auto"
         formato_regex:
-          ativo: false
-          regras: {}
+          ativo: true
+          regras: "auto"
 
   # ----------------------------------------------------------------------------
   # 4. Base Diária com Anomalias
   # ----------------------------------------------------------------------------
   tabela_particao_diaria_anomalias:
     ativo: true
-    descricao: "Base diária de transações com anomalias injetadas de 20261025 a 20261030"
+    descricao: "Base diária de transações com anomalias injetadas de 20261025 a 20261030 (regras 100% auto-aprendidas)"
     caminho_relativo: "tabela_particao_diaria_anomalias"
     coluna_particao: "anomesdia"
     tipo_particao: "diaria"
-    chaves_primarias:
-      - "id_transacao"
+    chaves_primarias: "auto"
     checks:
       particao:
         volumetria_historica:
           ativo: true
-          desvio_relativo_max: 0.30
-          z_score_robusto_max: 3.0
+          desvio_relativo_max: "auto"
+          z_score_robusto_max: "auto"
         evolucao_fotografias:
           ativo: true
-          permitir_atualizacao_particoes_passadas: false
-          queda_max_registros_pct: 0.0
-          colunas_evolucao_positiva: []
+          permitir_atualizacao_particoes_passadas: "auto"
+          queda_max_registros_pct: "auto"
+          colunas_evolucao_positiva: "auto"
         consistencia_data_particao:
           ativo: true
-          colunas_data_particao:
-            - "dt_transacao"
+          colunas_data_particao: "auto"
       maturacao_datas:
-        ativo: false
-        colunas: {}
+        ativo: "auto"
+        colunas: "auto"
       colunas:
         completude:
           ativo: true
-          limites_nulos_pct:
-            id_transacao: 0.0
-            id_cliente: 0.0
-            tipo_transacao: 0.0
-            canal: 0.0
-            valor_transacao: 0.0
-            moeda: 0.0
-            status_transacao: 0.0
-            uf_origem: 0.0
-            dt_transacao: 0.0
+          limites_nulos_pct: "auto"
         unicidade:
           ativo: true
           verificar_chave_primaria: true
           verificar_linha_completa: true
         dominio:
           ativo: true
-          regras:
-            tipo_transacao: ["PIX", "CARTAO_CREDITO", "CARTAO_DEBITO", "TED", "BOLETO"]
-            canal: ["APP", "INTERNET_BANKING", "CAIXA_ELETRONICO", "AGENCIA"]
-            moeda: ["BRL"]
-            status_transacao: ["APROVADA", "RECUSADA", "ESTORNADA"]
-            uf_origem: ["SP", "RJ", "MG", "PR", "RS", "BA", "SC", "DF"]
+          regras: "auto"
         intervalo_numerico:
           ativo: true
-          regras:
-            valor_transacao:
-              min: 0.01
-              max: 100000.0
+          regras: "auto"
         formato_regex:
-          ativo: false
-          regras: {}
+          ativo: true
+          regras: "auto"

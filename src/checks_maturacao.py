@@ -1,11 +1,13 @@
 """
 Check inteligente de Maturação / Atraso de Datas de Evento (`maturacao_datas`).
 
-O motor aprende SOZINHO tanto:
-1. Quantos dias cada coluna demora para estabilizar (`lag_estabilizacao_aprendido`),
+O motor aprende SOZINHO:
+1. Quais colunas são datas de eventos contínuos (quando não especificadas manualmente).
+2. Quantos dias cada coluna demora para estabilizar (`lag_estabilizacao_aprendido`),
    acompanhando a mesma `data_evento` através de fotografias consecutivas (`lag -> lag + 1`)
    até o ponto em que ela para de crescer e atinge o patamar maduro.
-2. Qual é o percentual esperado (`fator_maturacao_esperado`) em cada dia de atraso (`lag = 0, 1, ...`).
+3. O percentual esperado (`fator_maturacao_esperado`) em cada dia de atraso (`lag = 0, 1, ...`).
+4. A janela de avaliação (`janela_avaliacao_aprendida`) e a tolerância de desvio (`tolerancia_desvio_aprendida`).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ def executar_checks_maturacao(
     particoes_dfs: dict[str, pd.DataFrame],
     cfg_maturacao: dict[str, Any],
     snapshot_mgr: SnapshotManager,
+    chaves_primarias: list[str] | None = None,
 ) -> list[ResultadoCheck]:
     """Executa os checks de maturação/atraso de colunas de data com aprendizado 100% automático."""
     resultados: list[ResultadoCheck] = []
@@ -58,11 +61,9 @@ def executar_checks_maturacao(
         if col_data not in df_alvo.columns:
             continue
 
-        janela_avaliacao = int(params.get("janela_avaliacao_dias", 7))
-        tolerancia_curva = float(params.get("tolerancia_desvio_curva", 0.35))
         min_fotos = int(params.get("min_fotos_aprendizado", 2))
 
-        # 1. Aprende automaticamente o lag de estabilização e a curva usando fotos anteriores
+        # 1. Aprende automaticamente o lag de estabilização, curva, janela e tolerância
         aprendizado = snapshot_mgr.atualizar_e_obter_curva_aprendida(
             tabela=tabela,
             coluna_data=col_data,
@@ -73,7 +74,19 @@ def executar_checks_maturacao(
         curva_aprendida: dict[int, dict[str, Any]] = aprendizado["curva_por_lag"]
         tem_aprendizado = qtd_fotos_hist >= min_fotos
 
-        # 2. Registra a fotografia da execução atual na camada Bronze
+        janela_cfg = params.get("janela_avaliacao_dias", "auto")
+        if janela_cfg is None or str(janela_cfg).lower() == "auto":
+            janela_avaliacao = int(aprendizado.get("janela_avaliacao_aprendida", 5))
+        else:
+            janela_avaliacao = int(janela_cfg)
+
+        tol_cfg = params.get("tolerancia_desvio_curva", "auto")
+        if tol_cfg is None or str(tol_cfg).lower() == "auto":
+            tolerancia_curva = float(aprendizado.get("tolerancia_desvio_aprendida", 0.35))
+        else:
+            tolerancia_curva = float(tol_cfg)
+
+        # 2. Registra a fotografia da execução atual em `_metadados_dq/` (sem duplicatas de PK)
         df_foto_atual = snapshot_mgr.registrar_foto_eventos_data(
             run_id=run_id,
             dt_referencia=dt_referencia,
@@ -81,6 +94,7 @@ def executar_checks_maturacao(
             tabela=tabela,
             coluna_data=col_data,
             df_completo=df_alvo,
+            chaves_primarias=chaves_primarias,
         )
 
         # Atualiza o artefato Silver incluindo a foto recém-tirada para próximas execuções
@@ -90,7 +104,7 @@ def executar_checks_maturacao(
             dt_referencia_atual="9999-12-31",
         )
 
-        # Registra um check informativo sintetizando o atraso descoberto para a coluna
+        # Registra um check informativo sintetizando o atraso, janela e tolerância aprendidos
         if tem_aprendizado:
             resumo_curva = ", ".join(
                 f"lag {k}d={curva_aprendida[k]['fator_maturacao_esperado']:.0%}"
@@ -99,7 +113,8 @@ def executar_checks_maturacao(
             )
             detalhe_aprendizado = (
                 f"Motor aprendeu sozinho (em {qtd_fotos_hist} fotos) que `{col_data}` "
-                f"leva {lag_estabilizacao} dia(s) para estabilizar ({resumo_curva})"
+                f"leva {lag_estabilizacao} dia(s) para estabilizar ({resumo_curva}; "
+                f"janela={janela_avaliacao}d, tol=±{tolerancia_curva:.0%})"
             )
         else:
             detalhe_aprendizado = (
@@ -117,7 +132,7 @@ def executar_checks_maturacao(
                 tipo_check="diagnostico_atraso_aprendido",
                 coluna=col_data,
                 valor_observado=f"{lag_estabilizacao}d",
-                valor_esperado="Auto-aprendido via snapshots",
+                valor_esperado=f"Auto-aprendido (janela={janela_avaliacao}d, tol=±{tolerancia_curva:.0%})",
                 status="OK" if tem_aprendizado else "WARNING",
                 detalhes=detalhe_aprendizado,
             )

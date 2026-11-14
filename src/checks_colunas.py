@@ -1,12 +1,12 @@
 """
 Checks no nível de Colunas/Dados internos de cada partição (Micro).
 
-Inclui:
-1. Completude (percentual máximo de nulos por coluna).
-2. Unicidade (chaves primárias duplicadas e linhas inteiras duplicadas).
-3. Domínio (valores fora da lista de categorias permitidas).
-4. Intervalo Numérico (valores negativos, zerados ou outliers fora de [min, max]).
-5. Formato / Regex (validação de padrão e rejeição de dígitos repetidos como CPF '00000000000').
+Inclui (com aprendizado automático de regras e limiares via `auto_learner.py`):
+1. Completude (percentual máximo de nulos aprendido por coluna).
+2. Unicidade (chaves primárias auto-descobertas e linhas inteiras duplicadas).
+3. Domínio (vocabulário válido aprendido por recorrência entre partições).
+4. Intervalo Numérico (limites [min, max] aprendidos de partições estáveis sem outliers).
+5. Formato / Regex (validação de padrão estrutural aprendido e rejeição de dígitos repetidos).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def executar_checks_colunas(
     particoes_dfs: dict[str, pd.DataFrame],
     cfg_colunas: dict[str, Any],
 ) -> list[ResultadoCheck]:
-    """Executa todos os checks de colunas configurados em cada partição."""
+    """Executa todos os checks de colunas configurados/aprendidos em cada partição."""
     resultados: list[ResultadoCheck] = []
     if not particoes_dfs:
         return resultados
@@ -47,12 +47,15 @@ def executar_checks_colunas(
         # ---------------------------------------------------------------------
         # 1. Completude (Nulos)
         # ---------------------------------------------------------------------
-        if cfg_comp.get("ativo", False):
+        if cfg_comp.get("ativo", True):
             limites = cfg_comp.get("limites_nulos_pct", {}) or {}
+            origens_comp = cfg_comp.get("origens", {}) or {}
             for col, max_pct in limites.items():
                 if col not in df_part.columns:
                     continue
                 lim_max = float(max_pct)
+                origem_c = origens_comp.get(col, "AUTO_APRENDIDO")
+                tag_origem = "aprendido" if origem_c == "AUTO_APRENDIDO" else "YAML"
                 qtd_nulos = int(df_part[col].isna().sum())
                 pct_nulos = qtd_nulos / n_total
 
@@ -60,13 +63,13 @@ def executar_checks_colunas(
                     status = "ANOMALIA"
                     detalhe = (
                         f"Coluna `{col}` possui {qtd_nulos}/{n_total} nulos ({pct_nulos:.2%}), "
-                        f"acima do limite permitido de {lim_max:.2%}"
+                        f"acima do limite {tag_origem} de {lim_max:.2%}"
                     )
                 else:
                     status = "OK"
                     detalhe = (
                         f"Completude OK em `{col}`: {qtd_nulos}/{n_total} nulos "
-                        f"({pct_nulos:.2%} <= {lim_max:.2%})"
+                        f"({pct_nulos:.2%} <= limite {tag_origem} {lim_max:.2%})"
                     )
 
                 resultados.append(
@@ -80,7 +83,7 @@ def executar_checks_colunas(
                         tipo_check="completude",
                         coluna=col,
                         valor_observado=round(pct_nulos, 4),
-                        valor_esperado=f"<= {lim_max:.4f}",
+                        valor_esperado=f"<= {lim_max:.4f} ({tag_origem})",
                         status=status,
                         detalhes=detalhe,
                     )
@@ -89,7 +92,7 @@ def executar_checks_colunas(
         # ---------------------------------------------------------------------
         # 2. Unicidade (Chave Primária e Linha Completa)
         # ---------------------------------------------------------------------
-        if cfg_unic.get("ativo", False):
+        if cfg_unic.get("ativo", True):
             pks_presentes = [pk for pk in chaves_primarias if pk in df_part.columns]
             if cfg_unic.get("verificar_chave_primaria", True) and pks_presentes:
                 df_sem_nulo_pk = df_part.dropna(subset=pks_presentes)
@@ -150,13 +153,16 @@ def executar_checks_colunas(
                 )
 
         # ---------------------------------------------------------------------
-        # 3. Domínio (Categorias Válidas)
+        # 3. Domínio (Categorias Válidas Aprendidas / Configuradas)
         # ---------------------------------------------------------------------
-        if cfg_dom.get("ativo", False):
+        if cfg_dom.get("ativo", True):
             regras_dom = cfg_dom.get("regras", {}) or {}
+            origens_dom = cfg_dom.get("origens", {}) or {}
             for col, valores_validos in regras_dom.items():
                 if col not in df_part.columns:
                     continue
+                origem_d = origens_dom.get(col, "AUTO_APRENDIDO")
+                tag_d = "aprendido" if origem_d == "AUTO_APRENDIDO" else "YAML"
                 conjunto_valido = set(valores_validos)
                 serie_preenchida = df_part[col].dropna()
                 invalidos = serie_preenchida[~serie_preenchida.isin(conjunto_valido)]
@@ -166,12 +172,12 @@ def executar_checks_colunas(
                     exemplos = invalidos.unique()[:4].tolist()
                     status_d = "ANOMALIA"
                     detalhe_d = (
-                        f"{qtd_inv} valores fora do domínio permitido em `{col}`. "
+                        f"{qtd_inv} valores fora do domínio {tag_d} em `{col}`. "
                         f"Valores inválidos encontrados: {exemplos}"
                     )
                 else:
                     status_d = "OK"
-                    detalhe_d = f"Todos os valores preenchidos de `{col}` pertencem ao domínio válido"
+                    detalhe_d = f"Todos os valores preenchidos de `{col}` pertencem ao domínio {tag_d}"
 
                 resultados.append(
                     ResultadoCheck(
@@ -184,20 +190,23 @@ def executar_checks_colunas(
                         tipo_check="dominio",
                         coluna=col,
                         valor_observado=qtd_inv,
-                        valor_esperado=f"In {sorted(conjunto_valido)}",
+                        valor_esperado=f"In {sorted(conjunto_valido)} ({tag_d})",
                         status=status_d,
                         detalhes=detalhe_d,
                     )
                 )
 
         # ---------------------------------------------------------------------
-        # 4. Intervalo Numérico ([min, max])
+        # 4. Intervalo Numérico ([min, max] Aprendido / Configurado)
         # ---------------------------------------------------------------------
-        if cfg_int.get("ativo", False):
+        if cfg_int.get("ativo", True):
             regras_int = cfg_int.get("regras", {}) or {}
+            origens_int = cfg_int.get("origens", {}) or {}
             for col, limites_num in regras_int.items():
                 if col not in df_part.columns or not isinstance(limites_num, dict):
                     continue
+                origem_n = origens_int.get(col, "AUTO_APRENDIDO")
+                tag_n = "aprendido" if origem_n == "AUTO_APRENDIDO" else "YAML"
                 v_min = limites_num.get("min")
                 v_max = limites_num.get("max")
 
@@ -215,13 +224,13 @@ def executar_checks_colunas(
                     exemplos_num = fora_intervalo.unique()[:4].tolist()
                     status_n = "ANOMALIA"
                     detalhe_n = (
-                        f"{qtd_fora_num} registros em `{col}` fora do intervalo [{v_min}, {v_max}]. "
+                        f"{qtd_fora_num} registros em `{col}` fora do intervalo {tag_n} [{v_min}, {v_max}]. "
                         f"Exemplos: {exemplos_num}"
                     )
                 else:
                     status_n = "OK"
                     detalhe_n = (
-                        f"Todos os valores de `{col}` estão dentro do intervalo [{v_min}, {v_max}]"
+                        f"Todos os valores de `{col}` estão dentro do intervalo {tag_n} [{v_min}, {v_max}]"
                     )
 
                 resultados.append(
@@ -235,20 +244,23 @@ def executar_checks_colunas(
                         tipo_check="intervalo_numerico",
                         coluna=col,
                         valor_observado=qtd_fora_num,
-                        valor_esperado=f"[{v_min}, {v_max}]",
+                        valor_esperado=f"[{v_min}, {v_max}] ({tag_n})",
                         status=status_n,
                         detalhes=detalhe_n,
                     )
                 )
 
         # ---------------------------------------------------------------------
-        # 5. Formato / Regex
+        # 5. Formato / Regex Aprendido / Configurado
         # ---------------------------------------------------------------------
-        if cfg_reg.get("ativo", False):
+        if cfg_reg.get("ativo", True):
             regras_reg = cfg_reg.get("regras", {}) or {}
+            origens_reg = cfg_reg.get("origens", {}) or {}
             for col, params_reg in regras_reg.items():
                 if col not in df_part.columns or not isinstance(params_reg, dict):
                     continue
+                origem_r = origens_reg.get(col, "AUTO_APRENDIDO")
+                tag_r = "aprendido" if origem_r == "AUTO_APRENDIDO" else "YAML"
                 padrao = str(params_reg.get("padrao", ".*"))
                 rejeitar_rep = bool(params_reg.get("rejeitar_digitos_repetidos", False))
                 regex_comp = re.compile(padrao)
@@ -267,11 +279,11 @@ def executar_checks_colunas(
                     status_r = "ANOMALIA"
                     detalhe_r = (
                         f"{qtd_inv_reg} valores com formato inválido em `{col}` "
-                        f"(padrão `{padrao}`). Exemplos: {exemplos_r}"
+                        f"(padrão {tag_r} `{padrao}`). Exemplos: {exemplos_r}"
                     )
                 else:
                     status_r = "OK"
-                    detalhe_r = f"100% dos valores preenchidos em `{col}` seguem o formato `{padrao}`"
+                    detalhe_r = f"100% dos valores preenchidos em `{col}` seguem o formato {tag_r} `{padrao}`"
 
                 resultados.append(
                     ResultadoCheck(
@@ -284,7 +296,7 @@ def executar_checks_colunas(
                         tipo_check="formato_regex",
                         coluna=col,
                         valor_observado=qtd_inv_reg,
-                        valor_esperado=f"Regex {padrao}",
+                        valor_esperado=f"Regex {padrao} ({tag_r})",
                         status=status_r,
                         detalhes=detalhe_r,
                     )

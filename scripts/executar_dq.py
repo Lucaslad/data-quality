@@ -76,6 +76,7 @@ def main() -> None:
             engine.snapshot_mgr.arq_fotos_particoes,
             engine.snapshot_mgr.arq_fotos_eventos,
             engine.snapshot_mgr.arq_curva_aprendida,
+            engine.snapshot_mgr.arq_regras_aprendidas,
         ):
             if arq_ant.exists():
                 arq_ant.unlink()
@@ -88,6 +89,7 @@ def main() -> None:
                 dt_referencia=dt_hist.isoformat(),
                 filtro_tabelas=args.tabela,
                 verbose=False,
+                copiar_particoes=False,
             )
 
         # Restaura a base de origem para a data de referência final (D)
@@ -97,6 +99,7 @@ def main() -> None:
         dt_referencia=dt_ref.isoformat(),
         filtro_tabelas=args.tabela,
         verbose=True,
+        copiar_particoes=True,
     )
 
 

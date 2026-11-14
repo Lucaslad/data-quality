@@ -1,11 +1,11 @@
 """
 Checks no nível de Partição (Macro) e evolução entre Fotografias (Snapshots).
 
-Inclui:
-1. Volumetria Histórica da Partição (detecção robusta via Mediana + MAD de quedas e picos).
-2. Evolução entre Fotografias de Partições (monitora atualizações em partições passadas,
-   como novos `dt_cadastro_chave_pix`, e alerta perdas/regressões inesperadas de dados).
-3. Consistência de Data vs. Partição (verifica se colunas de data pertencem à safra da partição).
+Inclui (com aprendizado automático de parâmetros):
+1. Volumetria Histórica da Partição (detecção robusta via Mediana + MAD e CV aprendido).
+2. Evolução entre Fotografias de Partições (aprende quais colunas possuem evolução positiva
+   em partições passadas e audita regressões/perdas em todas as colunas).
+3. Consistência de Data vs. Partição (descobre quais colunas de data pertencem à safra da partição).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def executar_checks_particao(
     cfg_particao: dict[str, Any],
     df_fotos_particoes_hist: pd.DataFrame,
 ) -> list[ResultadoCheck]:
-    """Executa todos os checks configurados para o nível de partição."""
+    """Executa todos os checks configurados/aprendidos para o nível de partição."""
     resultados: list[ResultadoCheck] = []
     if not particoes_dfs:
         return resultados
@@ -48,16 +48,18 @@ def executar_checks_particao(
     # 1. Volumetria Histórica entre Partições
     # -------------------------------------------------------------------------
     cfg_vol = cfg_particao.get("volumetria_historica", {})
-    if cfg_vol.get("ativo", False):
-        desvio_rel_max = float(cfg_vol.get("desvio_relativo_max", 0.30))
+    if cfg_vol.get("ativo", True):
+        desvio_rel_max = float(cfg_vol.get("desvio_relativo_max", 0.20))
         z_max = float(cfg_vol.get("z_score_robusto_max", 3.0))
 
         volumes = [len(df) for df in particoes_dfs.values()]
-        mediana, sigma_rob = _calcular_estatisticas_robustas(volumes)
+        med_calc, sig_calc = _calcular_estatisticas_robustas(volumes)
+        mediana = float(cfg_vol.get("mediana_gold", med_calc))
+        sigma_rob = float(cfg_vol.get("sigma_gold", sig_calc))
 
         lim_inf = max(0, int(round(mediana * (1.0 - desvio_rel_max))))
         lim_sup = int(round(mediana * (1.0 + desvio_rel_max)))
-        faixa_str = f"[{lim_inf}, {lim_sup}] (mediana={int(round(mediana))})"
+        faixa_str = f"[{lim_inf}, {lim_sup}] (mediana={int(round(mediana))}, ±{desvio_rel_max:.0%})"
 
         for nome_part, df_part in sorted(particoes_dfs.items()):
             qtd = len(df_part)
@@ -69,13 +71,14 @@ def executar_checks_particao(
                 status = "ANOMALIA"
                 detalhe = (
                     f"{direcao} de volumetria na partição: {qtd} linhas "
-                    f"({desvio_rel:+.1%} vs mediana histórica de {mediana:.0f}, z={z_rob:.1f})"
+                    f"({desvio_rel:+.1%} vs mediana aprendida de {mediana:.0f}, "
+                    f"tol=±{desvio_rel_max:.0%}, z={z_rob:.1f})"
                 )
             else:
                 status = "OK"
                 detalhe = (
                     f"Volumetria da partição estável: {qtd} linhas "
-                    f"({desvio_rel:+.1%} vs mediana de {mediana:.0f})"
+                    f"({desvio_rel:+.1%} vs mediana aprendida de {mediana:.0f})"
                 )
 
             resultados.append(
@@ -99,7 +102,7 @@ def executar_checks_particao(
     # 2. Evolução entre Fotografias (Snapshots de Partições Passadas e Atuais)
     # -------------------------------------------------------------------------
     cfg_foto = cfg_particao.get("evolucao_fotografias", {})
-    if cfg_foto.get("ativo", False) and not df_fotos_particoes_hist.empty:
+    if cfg_foto.get("ativo", True) and not df_fotos_particoes_hist.empty:
         df_ant_tab = df_fotos_particoes_hist[
             (df_fotos_particoes_hist["tabela"] == tabela)
             & (df_fotos_particoes_hist["dt_referencia"] < dt_referencia)
@@ -128,18 +131,20 @@ def executar_checks_particao(
                 msgs_cols = []
                 regressao_coluna = False
 
-                for col_ev in cols_evolucao:
-                    if col_ev in df_part.columns and col_ev in preench_ant:
-                        p_ant = int(preench_ant[col_ev])
-                        p_atu = int(df_part[col_ev].notna().sum())
-                        delta_col = p_atu - p_ant
-                        if delta_col > 0:
-                            msgs_cols.append(f"{col_ev}: +{delta_col} novos preenchimentos")
-                        elif delta_col < 0:
-                            regressao_coluna = True
-                            msgs_cols.append(
-                                f"{col_ev}: REGRESSÃO de {delta_col} preenchimentos ({p_ant} -> {p_atu})"
-                            )
+                # Audita todas as colunas contra perda de preenchimento e destaca evolução positiva
+                for col_c in df_part.columns:
+                    if col_c not in preench_ant:
+                        continue
+                    p_ant = int(preench_ant[col_c])
+                    p_atu = int(df_part[col_c].notna().sum())
+                    delta_col = p_atu - p_ant
+                    if delta_col > 0 and col_c in cols_evolucao:
+                        msgs_cols.append(f"{col_c}: +{delta_col} novos preenchimentos")
+                    elif delta_col < 0:
+                        regressao_coluna = True
+                        msgs_cols.append(
+                            f"{col_c}: REGRESSÃO de {delta_col} preenchimentos ({p_ant} -> {p_atu})"
+                        )
 
                 if var_pct < -queda_max_pct or regressao_coluna:
                     status_f = "ANOMALIA"
@@ -180,7 +185,7 @@ def executar_checks_particao(
     # 3. Consistência de Data com a Partição (Timeliness interna)
     # -------------------------------------------------------------------------
     cfg_cons = cfg_particao.get("consistencia_data_particao", {})
-    if cfg_cons.get("ativo", False):
+    if cfg_cons.get("ativo", True):
         colunas_data = cfg_cons.get("colunas_data_particao", []) or []
         for nome_part, df_part in sorted(particoes_dfs.items()):
             valor_particao = nome_part.split("=")[-1]
@@ -209,7 +214,7 @@ def executar_checks_particao(
                     status_dt = "ANOMALIA"
                     detalhe_dt = (
                         f"{qtd_fora} registros ({qtd_fora / total_validos:.1%}) com `{col_dt}` "
-                        f"fora da partição `{nome_part}` (esperado prefixo `{prefixo_esperado}`, "
+                        f"fora da partição `{nome_part}` (esperado prefixo aprendido `{prefixo_esperado}`, "
                         f"exemplos encontrados: {exemplos})"
                     )
                 else:
