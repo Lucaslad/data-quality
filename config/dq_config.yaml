@@ -1,0 +1,318 @@
+# ==============================================================================
+# Configuração do Motor de Data Quality (Local / AWS Glue)
+# Permite habilitar/desabilitar bases, colunas e checks individualmente.
+# ==============================================================================
+
+configuracoes_gerais:
+  diretorio_origem: "dados/origem"
+  diretorio_saida: "dados/saida"
+  data_referencia_padrao: "2026-10-30"
+
+tabelas:
+  # ----------------------------------------------------------------------------
+  # 1. Base Mensal Limpa (Abertura de Conta / Faturas / Chave Pix com atraso normal de 3 dias)
+  # ----------------------------------------------------------------------------
+  tabela_particao_mensal:
+    ativo: true
+    descricao: "Base mensal de clientes (partição = anomes de abertura), com coluna dt_cadastro_chave_pix que reflete em até 3 dias"
+    caminho_relativo: "tabela_particao_mensal"
+    coluna_particao: "anomes"
+    tipo_particao: "mensal"
+    chaves_primarias:
+      - "id_fatura"
+    checks:
+      particao:
+        volumetria_historica:
+          ativo: true
+          desvio_relativo_max: 0.30
+          z_score_robusto_max: 3.0
+        evolucao_fotografias:
+          ativo: true
+          permitir_atualizacao_particoes_passadas: true
+          queda_max_registros_pct: 0.0
+          colunas_evolucao_positiva:
+            - "dt_cadastro_chave_pix"
+        consistencia_data_particao:
+          ativo: true
+          colunas_data_particao:
+            - "dt_fechamento"
+            - "dt_abertura_conta"
+      maturacao_datas:
+        ativo: true
+        # O motor aprende sozinho quantos dias de atraso (lag de estabilização)
+        # cada coluna possui comparando a evolução da mesma data entre fotografias.
+        colunas:
+          dt_cadastro_chave_pix:
+            ativo: true
+            janela_avaliacao_dias: 8
+            escopo_particoes: "todas"
+            tolerancia_desvio_curva: 0.35
+            min_fotos_aprendizado: 2
+          dt_abertura_conta:
+            ativo: true
+            janela_avaliacao_dias: 5
+            escopo_particoes: "todas"
+            tolerancia_desvio_curva: 0.35
+            min_fotos_aprendizado: 2
+      colunas:
+        completude:
+          ativo: true
+          limites_nulos_pct:
+            id_fatura: 0.0
+            id_cliente: 0.0
+            cpf: 0.0
+            uf: 0.0
+            segmento: 0.0
+            score_credito: 0.0
+            valor_fatura: 0.0
+            qtd_transacoes: 0.0
+            status_pagamento: 0.0
+            dt_abertura_conta: 0.0
+            dt_fechamento: 0.0
+            dt_cadastro_chave_pix: 0.25
+        unicidade:
+          ativo: true
+          verificar_chave_primaria: true
+          verificar_linha_completa: true
+        dominio:
+          ativo: true
+          regras:
+            uf: ["SP", "RJ", "MG", "PR", "RS", "BA", "SC", "DF"]
+            segmento: ["VAREJO", "UNICLASS", "PERSONNALITE", "EMPRESAS"]
+            status_pagamento: ["PAGO", "EM_ABERTO", "ATRASADO"]
+        intervalo_numerico:
+          ativo: true
+          regras:
+            valor_fatura:
+              min: 0.01
+              max: 100000.0
+            score_credito:
+              min: 300
+              max: 1000
+            qtd_transacoes:
+              min: 0
+              max: 1000
+        formato_regex:
+          ativo: true
+          regras:
+            cpf:
+              padrao: "^\\d{11}$"
+              rejeitar_digitos_repetidos: true
+
+  # ----------------------------------------------------------------------------
+  # 2. Base Mensal com Anomalias
+  # ----------------------------------------------------------------------------
+  tabela_particao_mensal_anomalias:
+    ativo: true
+    descricao: "Base mensal com anomalias injetadas (partição, colunas e falha de maturação em dt_cadastro_chave_pix)"
+    caminho_relativo: "tabela_particao_mensal_anomalias"
+    coluna_particao: "anomes"
+    tipo_particao: "mensal"
+    chaves_primarias:
+      - "id_fatura"
+    checks:
+      particao:
+        volumetria_historica:
+          ativo: true
+          desvio_relativo_max: 0.30
+          z_score_robusto_max: 3.0
+        evolucao_fotografias:
+          ativo: true
+          permitir_atualizacao_particoes_passadas: true
+          queda_max_registros_pct: 0.0
+          colunas_evolucao_positiva:
+            - "dt_cadastro_chave_pix"
+        consistencia_data_particao:
+          ativo: true
+          colunas_data_particao:
+            - "dt_fechamento"
+            - "dt_abertura_conta"
+      maturacao_datas:
+        ativo: true
+        # O motor aprende sozinho quantos dias de atraso (lag de estabilização)
+        # cada coluna possui comparando a evolução da mesma data entre fotografias.
+        colunas:
+          dt_cadastro_chave_pix:
+            ativo: true
+            janela_avaliacao_dias: 8
+            escopo_particoes: "todas"
+            tolerancia_desvio_curva: 0.35
+            min_fotos_aprendizado: 2
+          dt_abertura_conta:
+            ativo: true
+            janela_avaliacao_dias: 5
+            escopo_particoes: "todas"
+            tolerancia_desvio_curva: 0.35
+            min_fotos_aprendizado: 2
+      colunas:
+        completude:
+          ativo: true
+          limites_nulos_pct:
+            id_fatura: 0.0
+            id_cliente: 0.0
+            cpf: 0.0
+            uf: 0.0
+            segmento: 0.0
+            score_credito: 0.0
+            valor_fatura: 0.0
+            qtd_transacoes: 0.0
+            status_pagamento: 0.0
+            dt_abertura_conta: 0.0
+            dt_fechamento: 0.0
+            dt_cadastro_chave_pix: 0.25
+        unicidade:
+          ativo: true
+          verificar_chave_primaria: true
+          verificar_linha_completa: true
+        dominio:
+          ativo: true
+          regras:
+            uf: ["SP", "RJ", "MG", "PR", "RS", "BA", "SC", "DF"]
+            segmento: ["VAREJO", "UNICLASS", "PERSONNALITE", "EMPRESAS"]
+            status_pagamento: ["PAGO", "EM_ABERTO", "ATRASADO"]
+        intervalo_numerico:
+          ativo: true
+          regras:
+            valor_fatura:
+              min: 0.01
+              max: 100000.0
+            score_credito:
+              min: 300
+              max: 1000
+            qtd_transacoes:
+              min: 0
+              max: 1000
+        formato_regex:
+          ativo: true
+          regras:
+            cpf:
+              padrao: "^\\d{11}$"
+              rejeitar_digitos_repetidos: true
+
+  # ----------------------------------------------------------------------------
+  # 3. Base Diária Limpa (Transações Financeiras)
+  # ----------------------------------------------------------------------------
+  tabela_particao_diaria:
+    ativo: true
+    descricao: "Base diária limpa de transações financeiras (anomesdia)"
+    caminho_relativo: "tabela_particao_diaria"
+    coluna_particao: "anomesdia"
+    tipo_particao: "diaria"
+    chaves_primarias:
+      - "id_transacao"
+    checks:
+      particao:
+        volumetria_historica:
+          ativo: true
+          desvio_relativo_max: 0.30
+          z_score_robusto_max: 3.0
+        evolucao_fotografias:
+          ativo: true
+          permitir_atualizacao_particoes_passadas: false
+          queda_max_registros_pct: 0.0
+          colunas_evolucao_positiva: []
+        consistencia_data_particao:
+          ativo: true
+          colunas_data_particao:
+            - "dt_transacao"
+      maturacao_datas:
+        ativo: false
+        colunas: {}
+      colunas:
+        completude:
+          ativo: true
+          limites_nulos_pct:
+            id_transacao: 0.0
+            id_cliente: 0.0
+            tipo_transacao: 0.0
+            canal: 0.0
+            valor_transacao: 0.0
+            moeda: 0.0
+            status_transacao: 0.0
+            uf_origem: 0.0
+            dt_transacao: 0.0
+        unicidade:
+          ativo: true
+          verificar_chave_primaria: true
+          verificar_linha_completa: true
+        dominio:
+          ativo: true
+          regras:
+            tipo_transacao: ["PIX", "CARTAO_CREDITO", "CARTAO_DEBITO", "TED", "BOLETO"]
+            canal: ["APP", "INTERNET_BANKING", "CAIXA_ELETRONICO", "AGENCIA"]
+            moeda: ["BRL"]
+            status_transacao: ["APROVADA", "RECUSADA", "ESTORNADA"]
+            uf_origem: ["SP", "RJ", "MG", "PR", "RS", "BA", "SC", "DF"]
+        intervalo_numerico:
+          ativo: true
+          regras:
+            valor_transacao:
+              min: 0.01
+              max: 100000.0
+        formato_regex:
+          ativo: false
+          regras: {}
+
+  # ----------------------------------------------------------------------------
+  # 4. Base Diária com Anomalias
+  # ----------------------------------------------------------------------------
+  tabela_particao_diaria_anomalias:
+    ativo: true
+    descricao: "Base diária de transações com anomalias injetadas de 20261025 a 20261030"
+    caminho_relativo: "tabela_particao_diaria_anomalias"
+    coluna_particao: "anomesdia"
+    tipo_particao: "diaria"
+    chaves_primarias:
+      - "id_transacao"
+    checks:
+      particao:
+        volumetria_historica:
+          ativo: true
+          desvio_relativo_max: 0.30
+          z_score_robusto_max: 3.0
+        evolucao_fotografias:
+          ativo: true
+          permitir_atualizacao_particoes_passadas: false
+          queda_max_registros_pct: 0.0
+          colunas_evolucao_positiva: []
+        consistencia_data_particao:
+          ativo: true
+          colunas_data_particao:
+            - "dt_transacao"
+      maturacao_datas:
+        ativo: false
+        colunas: {}
+      colunas:
+        completude:
+          ativo: true
+          limites_nulos_pct:
+            id_transacao: 0.0
+            id_cliente: 0.0
+            tipo_transacao: 0.0
+            canal: 0.0
+            valor_transacao: 0.0
+            moeda: 0.0
+            status_transacao: 0.0
+            uf_origem: 0.0
+            dt_transacao: 0.0
+        unicidade:
+          ativo: true
+          verificar_chave_primaria: true
+          verificar_linha_completa: true
+        dominio:
+          ativo: true
+          regras:
+            tipo_transacao: ["PIX", "CARTAO_CREDITO", "CARTAO_DEBITO", "TED", "BOLETO"]
+            canal: ["APP", "INTERNET_BANKING", "CAIXA_ELETRONICO", "AGENCIA"]
+            moeda: ["BRL"]
+            status_transacao: ["APROVADA", "RECUSADA", "ESTORNADA"]
+            uf_origem: ["SP", "RJ", "MG", "PR", "RS", "BA", "SC", "DF"]
+        intervalo_numerico:
+          ativo: true
+          regras:
+            valor_transacao:
+              min: 0.01
+              max: 100000.0
+        formato_regex:
+          ativo: false
+          regras: {}
