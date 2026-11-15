@@ -37,7 +37,10 @@ dados/
         ├── resultados_checks_detalhados.parquet
         ├── resumo_qualidade_tabelas.parquet
         ├── alertas_anomalias.parquet
-        └── relatorio_ultima_execucao.md
+        ├── catalogo_particoes_registradas.parquet
+        ├── relatorio_ultima_execucao.md
+        └── particionado/
+            └── <artefato>/tabela=<nome>/dt_referencia=<YYYY-MM-DD>/part-0.snappy.parquet
 ```
 
 ### 1. Dados de Origem (`dados/origem/`)
@@ -52,12 +55,12 @@ Armazena as tabelas de entrada (em formato **Parquet** com compressão **Snappy*
 Cada partição avaliada em `dados/origem/` é copiada **exclusivamente** para a pasta correspondente à sua classificação de qualidade:
 
 - **`gold/<tabela>/<particao>/`**: Partições **100% saudáveis** (`0 anomalias` e `0 warnings`), prontas para consumo analítico e de negócio.
-- **`silver/<tabela>/<particao>/`**: Partições **em atenção / falha leve**, cuja estrutura principal (chave primária, volumetria histórica, evolução entre fotos e curva de maturação) está íntegra, mas que possuem *warnings* ou desvios restritos a colunas não-chave (ex.: `anomes=202608` na mensal; `anomesdia=20261025`, `20261027` e `20261029` na diária).
-- **`bronze/<tabela>/<particao>/`**: Partições em **quarentena / falha crítica**, reprovadas por quebra estrutural (chave primária duplicada, queda brusca ou pico anômalo de volumetria, perda de registros entre fotografias, falha na curva de maturação ou excesso de anomalias simultâneas — ex.: `anomes=202609` e `202610` na mensal; `anomesdia=20261026`, `20261028` e `20261030` na diária).
-- **`_metadados_dq/`**: Artefatos internos de controle, aprendizado e observabilidade do motor:
+- **`silver/<tabela>/<particao>/`**: Partições **em atenção / falha leve**, cuja estrutura principal (chave primária sem nulos ou duplicatas, schema obrigatório, volumetria histórica, evolução entre fotos e curva de maturação) está íntegra, mas que possuem *warnings* ou desvios restritos a colunas não-chave (ex.: `anomes=202608` na mensal; `anomesdia=20261025`, `20261027` e `20261029` na diária).
+- **`bronze/<tabela>/<particao>/`**: Partições em **quarentena / falha crítica**, reprovadas por quebra estrutural (chave primária duplicada ou nula, coluna obrigatória ausente/incompatível, queda brusca ou pico anômalo de volumetria, perda de registros entre fotografias, falha na curva de maturação ou excesso de anomalias simultâneas — ex.: `anomes=202609` e `202610` na mensal; `anomesdia=20261026`, `20261028` e `20261030` na diária).
+- **`_metadados_dq/`**: Artefatos internos de controle, aprendizado e observabilidade do motor (salvos tanto consolidados quanto particionados em `_metadados_dq/particionado/` para evitar *race conditions* em jobs concorrentes no AWS Glue):
   - `snapshots_particoes.parquet` e `snapshots_eventos_data.parquet`: fotografias históricas para aprendizado.
-  - `regras_aprendidas.parquet` e `curva_maturacao_aprendida.parquet`: todas as regras, faixas, domínios e curvas de atraso aprendidos automaticamente pelo motor.
-  - `classificacao_particoes.parquet`: registro auditável do destino (`GOLD`, `SILVER` ou `BRONZE`) e motivo de classificação de cada partição copiada.
+  - `regras_aprendidas.parquet` e `curva_maturacao_aprendida.parquet`: todas as regras, schemas, faixas, domínios, dígitos verificadores, relações entre colunas e curvas de atraso aprendidos automaticamente pelo motor.
+  - `classificacao_particoes.parquet` e `catalogo_particoes_registradas.parquet`: registro auditável do destino (`GOLD`, `SILVER` ou `BRONZE`), motivo de classificação e manifesto de partições registradas no Glue Data Catalog / Apache Iceberg.
   - `resultados_checks_detalhados.parquet`, `resumo_qualidade_tabelas.parquet`, `alertas_anomalias.parquet` e `relatorio_ultima_execucao.md`.
 
 ### Como Executar
@@ -66,6 +69,12 @@ Cada partição avaliada em `dados/origem/` é copiada **exclusivamente** para a
 # Executar simulando fotografias históricas (D-4 a D-1) para aprendizado e avaliando/roteando as partições em D:
 .\.venv\Scripts\python.exe scripts\executar_dq.py --simular-historico-fotos
 
-# Executar apenas na data de referência padrão definida no YAML:
+# Executar apenas na data de referência padrão definida no YAML (leitura incremental via Cache GOLD):
 .\.venv\Scripts\python.exe scripts\executar_dq.py
+
+# Executar em modo Streaming (libera DataFrames da memória RAM imediatamente após extrair o perfil):
+.\.venv\Scripts\python.exe scripts\executar_dq.py --streaming
+
+# Executar a suíte de testes automatizados:
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```

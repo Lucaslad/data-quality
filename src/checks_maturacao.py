@@ -8,6 +8,12 @@ O motor aprende SOZINHO:
    até o ponto em que ela para de crescer e atinge o patamar maduro.
 3. O percentual esperado (`fator_maturacao_esperado`) em cada dia de atraso (`lag = 0, 1, ...`).
 4. A janela de avaliação (`janela_avaliacao_aprendida`) e a tolerância de desvio (`tolerancia_desvio_aprendida`).
+
+Melhorias implementadas (Itens 1.5 e 4.1):
+- Filtra partições históricas com falhas estruturais críticas (`BRONZE`) antes de agregar
+  a fotografia de eventos, impedindo contaminação da referência madura.
+- Elimina a dupla escrita de Parquet em `curva_maturacao_aprendida.parquet`.
+- Suporta execução 100% via perfis estatísticos (`perfis_particoes`) no modo *Streaming*.
 """
 
 from __future__ import annotations
@@ -29,18 +35,54 @@ def executar_checks_maturacao(
     cfg_maturacao: dict[str, Any],
     snapshot_mgr: SnapshotManager,
     chaves_primarias: list[str] | None = None,
+    perfis_cache_gold: dict[str, dict[str, Any]] | None = None,
+    perfis_particoes: dict[str, dict[str, Any]] | None = None,
+    particoes_contaminadas_estruturais: set[str] | None = None,
 ) -> list[ResultadoCheck]:
     """Executa os checks de maturação/atraso de colunas de data com aprendizado 100% automático."""
     resultados: list[ResultadoCheck] = []
-    if not cfg_maturacao.get("ativo", False) or not particoes_dfs:
+    if not cfg_maturacao.get("ativo", False) or (
+        not particoes_dfs and not perfis_cache_gold and not perfis_particoes
+    ):
         return resultados
 
     colunas_cfg = cfg_maturacao.get("colunas", {}) or {}
     if not colunas_cfg:
         return resultados
 
-    df_todas_particoes = pd.concat(list(particoes_dfs.values()), ignore_index=True)
-    ultima_particao_nome = sorted(particoes_dfs.keys())[-1]
+    contaminadas_set = particoes_contaminadas_estruturais or set()
+    todas_chaves = sorted(
+        set(particoes_dfs.keys())
+        | set((perfis_cache_gold or {}).keys())
+        | set((perfis_particoes or {}).keys())
+    )
+    if not todas_chaves:
+        return resultados
+
+    ultima_particao_nome = todas_chaves[-1]
+
+    # Filtra partições históricas (< ultima_particao_nome) que estão em BRONZE / falha crítica estrutural (Item 1.5)
+    dfs_filtrados = {
+        nome_p: df_p
+        for nome_p, df_p in particoes_dfs.items()
+        if not (nome_p < ultima_particao_nome and nome_p in contaminadas_set)
+    }
+
+    df_todas_particoes = (
+        pd.concat(list(dfs_filtrados.values()), ignore_index=True)
+        if dfs_filtrados
+        else pd.DataFrame()
+    )
+
+    # Perfis pré-agregados das partições que não estão em `dfs_filtrados` (Cache GOLD ou Streaming)
+    perfis_complementares: dict[str, dict[str, Any]] = {}
+    mapa_perfis_fonte = perfis_particoes or perfis_cache_gold or {}
+    for nome_p, perf_p in mapa_perfis_fonte.items():
+        if nome_p in dfs_filtrados:
+            continue
+        if nome_p < ultima_particao_nome and nome_p in contaminadas_set:
+            continue
+        perfis_complementares[nome_p] = perf_p
 
     for col_data, params in colunas_cfg.items():
         if isinstance(params, bool):
@@ -54,20 +96,33 @@ def executar_checks_maturacao(
         df_alvo = (
             df_todas_particoes
             if escopo == "todas"
-            else particoes_dfs[ultima_particao_nome]
+            else particoes_dfs.get(ultima_particao_nome, pd.DataFrame())
         )
-        particao_label = "TODAS_PARTICOES" if escopo == "todas" else ultima_particao_nome
+        perfis_alvo = (
+            perfis_complementares
+            if escopo == "todas"
+            else (
+                {ultima_particao_nome: mapa_perfis_fonte[ultima_particao_nome]}
+                if ultima_particao_nome not in particoes_dfs
+                and ultima_particao_nome in mapa_perfis_fonte
+                else None
+            )
+        )
+        particao_label = (
+            "TODAS_PARTICOES" if escopo == "todas" else ultima_particao_nome
+        )
 
-        if col_data not in df_alvo.columns:
+        if not df_alvo.empty and col_data not in df_alvo.columns:
             continue
 
         min_fotos = int(params.get("min_fotos_aprendizado", 2))
 
-        # 1. Aprende automaticamente o lag de estabilização, curva, janela e tolerância
+        # 1. Obtém a curva aprendida em memória (persistir=False para evitar dupla escrita de Parquet, Item 1.5)
         aprendizado = snapshot_mgr.atualizar_e_obter_curva_aprendida(
             tabela=tabela,
             coluna_data=col_data,
             dt_referencia_atual=dt_referencia,
+            persistir=False,
         )
         qtd_fotos_hist = int(aprendizado["qtd_fotos_historico"])
         lag_estabilizacao = int(aprendizado["lag_estabilizacao_aprendido"])
@@ -82,7 +137,9 @@ def executar_checks_maturacao(
 
         tol_cfg = params.get("tolerancia_desvio_curva", "auto")
         if tol_cfg is None or str(tol_cfg).lower() == "auto":
-            tolerancia_curva = float(aprendizado.get("tolerancia_desvio_aprendida", 0.35))
+            tolerancia_curva = float(
+                aprendizado.get("tolerancia_desvio_aprendida", 0.35)
+            )
         else:
             tolerancia_curva = float(tol_cfg)
 
@@ -95,13 +152,15 @@ def executar_checks_maturacao(
             coluna_data=col_data,
             df_completo=df_alvo,
             chaves_primarias=chaves_primarias,
+            perfis_cache_gold=perfis_alvo,
         )
 
-        # Atualiza o artefato Silver incluindo a foto recém-tirada para próximas execuções
+        # 3. Persiste o artefato de curva aprendida UMA única vez por coluna na execução (Item 1.5)
         snapshot_mgr.atualizar_e_obter_curva_aprendida(
             tabela=tabela,
             coluna_data=col_data,
             dt_referencia_atual="9999-12-31",
+            persistir=True,
         )
 
         # Registra um check informativo sintetizando o atraso, janela e tolerância aprendidos

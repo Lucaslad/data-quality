@@ -3,26 +3,73 @@
 #
 # Modelo Híbrido (Auto-Learn + Override Opcional):
 # Por padrão (`"auto"`), o motor aprende SOZINHO todas as métricas e regras a partir
-# do histórico de partições e das fotografias na camada Bronze/Silver:
-#   1. Chaves primárias (auto-descoberta de colunas identificadoras 100% únicas).
-#   2. Volumetria histórica (mediana, MAD e tolerância de desvio relativo aprendida).
-#   3. Evolução entre fotografias (quais colunas evoluem no passado vs. imutáveis).
-#   4. Consistência data vs. partição (quais datas pertencem estritamente à safra).
-#   5. Maturação de datas (quais datas são eventos diários, lag de estabilização,
+# do histórico de partições e das fotografias na camada Gold:
+#   1. Chaves primárias (auto-descoberta de colunas identificadoras simples ou compostas).
+#   2. Contrato de Schema / Schema Drift (colunas obrigatórias, tipos e colunas extras).
+#   3. Freshness / SLA de chegada e continuidade na sequência de partições.
+#   4. Volumetria histórica (mediana, MAD, janela móvel, sazonalidade semanal e duplo estágio).
+#   5. Evolução entre fotografias (quais colunas evoluem no passado vs. imutáveis).
+#   6. Consistência data vs. partição (quais datas pertencem estritamente à safra).
+#   7. Maturação de datas (quais datas são eventos diários, lag de estabilização,
 #      curva por lag, janela de avaliação e tolerância de desvio).
-#   6. Completude (limite máximo de nulos aprendido por coluna).
-#   7. Domínio categórico (vocabulário recorrente válido e mix histórico de categorias).
-#   8. Intervalo numérico (limites [min, max] aprendidos de partições estáveis).
-#   9. Formato / Regex (inferência de máscara estrutural como CPF e dígitos repetidos).
-#
-# Caso deseje travar uma regra fixa de contrato para alguma coluna específica,
-# basta substituir `"auto"` pelo dicionário/valor explícito correspondente.
+#   8. Completude (limite máximo de nulos aprendido por coluna).
+#   9. Domínio categórico e Distribution Drift (vocabulário válido e PSI/JSD do mix histórico).
+#  10. Intervalo numérico (limites [min, max] aprendidos com escala log10 dinâmica).
+#  11. Formato / Regex vetorizado e Dígito Verificador Módulo 11 (CPF/CNPJ).
+#  12. Consistência relacional entre colunas (Cross-Column, ex.: precedência de datas).
 # ==============================================================================
 
 configuracoes_gerais:
   diretorio_origem: "dados/origem"
   diretorio_saida: "dados/saida"
   data_referencia_padrao: "2026-10-30"
+  # Leitura Incremental de Partições:
+  # - Quando `true`, evita reler arquivos Parquet de partições antigas que já são GOLD e não mudaram no disco/S3.
+  leitura_incremental: true
+  janela_leitura_recente_diaria: 5
+  janela_leitura_recente_mensal: 2
+  # Processamento em Streaming de Memória (AWS Glue):
+  # - Quando `true`, extrai o perfil estatístico completo ao ler cada partição e libera o DataFrame da RAM imediatamente.
+  modo_streaming_memoria: false
+  # Particionamento de Metadados (_metadados_dq/particionado/):
+  # - Evita race conditions em execuções concorrentes no AWS Glue.
+  particionar_metadados: true
+  # Observabilidade / Logging ("console" para terminal local ou "json" para AWS CloudWatch):
+  formato_log: "console"
+  nivel_log: "INFO"
+  # Roteamento Medallion e Score Ponderado:
+  roteamento_e_score:
+    limite_max_anomalias_silver: 6
+    teto_score_bronze: 65.0
+    checks_estruturais_criticos:
+      - "consistencia_schema"
+      - "freshness_particao"
+      - "unicidade_chave_primaria"
+      - "unicidade_linha_completa"
+      - "volumetria_historica"
+      - "evolucao_fotografias"
+    pesos_checks:
+      consistencia_schema: 3.0
+      unicidade_chave_primaria: 3.0
+      volumetria_historica: 3.0
+      evolucao_fotografias: 3.0
+      unicidade_linha_completa: 2.5
+      freshness_particao: 2.5
+      consistencia_data_particao: 2.0
+      completude: 1.5
+      consistencia_entre_colunas: 1.5
+      dominio: 1.0
+      drift_distribuicao: 1.0
+      intervalo_numerico: 1.0
+      formato_regex: 1.0
+      digito_verificador: 1.0
+  # Integração pós-roteamento com Catálogo (AWS Glue Data Catalog / Apache Iceberg):
+  integracao_catalogo:
+    ativo: false
+    tipo: "glue"
+    database_gold: "dq_gold_db"
+    database_silver: "dq_silver_db"
+    database_bronze: "dq_bronze_db"
 
 tabelas:
   # ----------------------------------------------------------------------------
@@ -37,10 +84,18 @@ tabelas:
     chaves_primarias: "auto"
     checks:
       particao:
+        consistencia_schema:
+          ativo: true
+          schema_esperado: "auto"
+        freshness_lacunas:
+          ativo: true
+          sla_atraso_max_particoes: "auto"
+          verificar_lacunas: true
         volumetria_historica:
           ativo: true
           desvio_relativo_max: "auto"
           z_score_robusto_max: "auto"
+          janela_historico_particoes: "auto"
         evolucao_fotografias:
           ativo: true
           permitir_atualizacao_particoes_passadas: "auto"
@@ -63,10 +118,17 @@ tabelas:
         dominio:
           ativo: true
           regras: "auto"
+          verificar_drift_mix: true
         intervalo_numerico:
           ativo: true
           regras: "auto"
         formato_regex:
+          ativo: true
+          regras: "auto"
+        digito_verificador:
+          ativo: true
+          regras: "auto"
+        consistencia_entre_colunas:
           ativo: true
           regras: "auto"
 
@@ -82,10 +144,18 @@ tabelas:
     chaves_primarias: "auto"
     checks:
       particao:
+        consistencia_schema:
+          ativo: true
+          schema_esperado: "auto"
+        freshness_lacunas:
+          ativo: true
+          sla_atraso_max_particoes: "auto"
+          verificar_lacunas: true
         volumetria_historica:
           ativo: true
           desvio_relativo_max: "auto"
           z_score_robusto_max: "auto"
+          janela_historico_particoes: "auto"
         evolucao_fotografias:
           ativo: true
           permitir_atualizacao_particoes_passadas: "auto"
@@ -108,10 +178,17 @@ tabelas:
         dominio:
           ativo: true
           regras: "auto"
+          verificar_drift_mix: true
         intervalo_numerico:
           ativo: true
           regras: "auto"
         formato_regex:
+          ativo: true
+          regras: "auto"
+        digito_verificador:
+          ativo: true
+          regras: "auto"
+        consistencia_entre_colunas:
           ativo: true
           regras: "auto"
 
@@ -127,10 +204,19 @@ tabelas:
     chaves_primarias: "auto"
     checks:
       particao:
+        consistencia_schema:
+          ativo: true
+          schema_esperado: "auto"
+        freshness_lacunas:
+          ativo: true
+          sla_atraso_max_particoes: "auto"
+          verificar_lacunas: true
         volumetria_historica:
           ativo: true
           desvio_relativo_max: "auto"
           z_score_robusto_max: "auto"
+          janela_historico_particoes: "auto"
+          sazonalidade_semanal: "auto"
         evolucao_fotografias:
           ativo: true
           permitir_atualizacao_particoes_passadas: "auto"
@@ -153,10 +239,17 @@ tabelas:
         dominio:
           ativo: true
           regras: "auto"
+          verificar_drift_mix: true
         intervalo_numerico:
           ativo: true
           regras: "auto"
         formato_regex:
+          ativo: true
+          regras: "auto"
+        digito_verificador:
+          ativo: true
+          regras: "auto"
+        consistencia_entre_colunas:
           ativo: true
           regras: "auto"
 
@@ -172,10 +265,19 @@ tabelas:
     chaves_primarias: "auto"
     checks:
       particao:
+        consistencia_schema:
+          ativo: true
+          schema_esperado: "auto"
+        freshness_lacunas:
+          ativo: true
+          sla_atraso_max_particoes: "auto"
+          verificar_lacunas: true
         volumetria_historica:
           ativo: true
           desvio_relativo_max: "auto"
           z_score_robusto_max: "auto"
+          janela_historico_particoes: "auto"
+          sazonalidade_semanal: "auto"
         evolucao_fotografias:
           ativo: true
           permitir_atualizacao_particoes_passadas: "auto"
@@ -198,9 +300,16 @@ tabelas:
         dominio:
           ativo: true
           regras: "auto"
+          verificar_drift_mix: true
         intervalo_numerico:
           ativo: true
           regras: "auto"
         formato_regex:
+          ativo: true
+          regras: "auto"
+        digito_verificador:
+          ativo: true
+          regras: "auto"
+        consistencia_entre_colunas:
           ativo: true
           regras: "auto"

@@ -1,1 +1,29 @@
-.venv
+# Ambiente virtual Python
+.venv/
+venv/
+ENV/
+
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Empacotamento e build
+build/
+dist/
+*.egg-info/
+
+# Artefatos e dados gerados localmente (preserva estrutura via .gitkeep)
+dados/origem/*
+!dados/origem/.gitkeep
+dados/saida/bronze/*
+!dados/saida/bronze/.gitkeep
+dados/saida/silver/*
+!dados/saida/silver/.gitkeep
+dados/saida/gold/*
+!dados/saida/gold/.gitkeep
+dados/saida/_metadados_dq/*
+!dados/saida/_metadados_dq/.gitkeep

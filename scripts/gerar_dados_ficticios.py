@@ -53,11 +53,19 @@ def _nome_arquivo_s3(semente: str) -> str:
 
 
 def _gerar_cpf_valido(rng: random.Random) -> str:
-    """Gera uma string numérica de 11 dígitos não repetidos simulando um CPF."""
+    """Gera uma string numérica de 11 dígitos não repetidos matematicamente válida pelo Módulo 11 (CPF)."""
     while True:
-        cpf = "".join(str(rng.randint(0, 9)) for _ in range(11))
-        if len(set(cpf)) > 1:
-            return cpf
+        bruto = "".join(str(rng.randint(0, 9)) for _ in range(11))
+        if len(set(bruto[:9])) > 1:
+            base9 = bruto[:9]
+            soma1 = sum(int(d) * peso for d, peso in zip(base9, range(10, 1, -1)))
+            r1 = (soma1 * 10) % 11
+            d1 = 0 if r1 == 10 else r1
+            base10 = base9 + str(d1)
+            soma2 = sum(int(d) * peso for d, peso in zip(base10, range(11, 1, -1)))
+            r2 = (soma2 * 10) % 11
+            d2 = 0 if r2 == 10 else r2
+            return f"{base9}{d1}{d2}"
 
 
 def gerar_df_mensal_limpo(
@@ -361,16 +369,32 @@ def injetar_anomalias_diario(df: pd.DataFrame, anomesdia: str) -> pd.DataFrame:
 
 
 def salvar_particao(
-    tabela_dir: Path, nome_particao: str, df: pd.DataFrame
+    tabela_dir: Path,
+    nome_particao: str,
+    df: pd.DataFrame,
+    forcar_reescrita: bool = False,
+    sufixo_semente: str = "",
 ) -> Path:
     part_dir = tabela_dir / nome_particao
     part_dir.mkdir(parents=True, exist_ok=True)
+
+    semente = f"{tabela_dir.name}/{nome_particao}{sufixo_semente}"
+    caminho_arquivo = part_dir / _nome_arquivo_s3(semente)
+
+    # Em modo normal, se o arquivo já existe e o DataFrame é 100% idêntico,
+    # preserva o arquivo físico (mantendo mtime/fingerprint no S3/disco inalterados).
+    if not forcar_reescrita and caminho_arquivo.exists():
+        try:
+            df_existente = pd.read_parquet(caminho_arquivo)
+            if df_existente.equals(df):
+                return caminho_arquivo
+        except Exception:
+            pass
 
     # Remove arquivos parquet antigos na partição para evitar acúmulo em re-execuções
     for arq in part_dir.glob("*.parquet"):
         arq.unlink()
 
-    caminho_arquivo = part_dir / _nome_arquivo_s3(f"{tabela_dir.name}/{nome_particao}")
     df.to_parquet(caminho_arquivo, engine="pyarrow", compression="snappy", index=False)
     return caminho_arquivo
 
@@ -420,13 +444,115 @@ def gerar_bases_para_data(
         dt_part = dt.date(
             int(anomesdia[:4]), int(anomesdia[4:6]), int(anomesdia[6:8])
         )
+        nome_part = f"anomesdia={anomesdia}"
         if dt_part > dt_referencia_foto:
+            for d_tab in (dir_diaria_limpa, dir_diaria_anom):
+                pasta_futura = d_tab / nome_part
+                if pasta_futura.exists():
+                    shutil.rmtree(pasta_futura)
             continue
         df_limpo = gerar_df_diario_limpo(anomesdia, n_linhas=n_linhas, seed=500 + idx)
-        salvar_particao(dir_diaria_limpa, f"anomesdia={anomesdia}", df_limpo)
+        salvar_particao(dir_diaria_limpa, nome_part, df_limpo)
 
         df_anom = injetar_anomalias_diario(df_limpo, anomesdia=anomesdia)
-        salvar_particao(dir_diaria_anom, f"anomesdia={anomesdia}", df_anom)
+        salvar_particao(dir_diaria_anom, nome_part, df_anom)
+
+
+def simular_cenarios_reprocessamento_historico(verbose: bool = True) -> None:
+    """
+    Injeta 4 cenários reais de reprocessamento de partições históricas (fora da janela ativa)
+    para validar a detecção física (mtime/ETag) e lógica (hash, somas, domínios e volume):
+      1. Reprocessamento Idempotente (`tabela_particao_diaria/anomesdia=20261005`):
+         Arquivo Parquet é recriado com novo nome/timestamp, mas com dados 100% idênticos.
+      2. Reprocessamento Silencioso de Valores (`tabela_particao_diaria/anomesdia=20261010`):
+         Mesma quantidade de linhas (303) e 0 nulos, mas recalcula `valor_transacao` e altera
+         categorias em `status_transacao`.
+      3. Reprocessamento com Expurgo de Linhas (`tabela_particao_mensal/anomes=202606`):
+         Remove 12 registros históricos (488 -> 476 linhas, ainda dentro da tolerância de volume,
+         porém perdendo linhas em relação à fotografia GOLD anterior).
+      4. Reprocessamento Corretivo de Quarentena (`tabela_particao_diaria_anomalias/anomesdia=20261028`):
+         Corrige a partição que estava em BRONZE (tinha apenas 25 linhas) restaurando os 299 registros limpos.
+    """
+    dir_diaria_limpa = ORIGEM_DIR / "tabela_particao_diaria"
+    dir_diaria_anom = ORIGEM_DIR / "tabela_particao_diaria_anomalias"
+    dir_mensal_limpa = ORIGEM_DIR / "tabela_particao_mensal"
+
+    if verbose:
+        print("\n[SIMULAÇÃO DE REPROCESSAMENTO HISTÓRICO] Aplicando 4 cenários nas bases de origem:")
+
+    # 1. Reprocessamento Físico Idempotente em anomesdia=20261005
+    pasta_c1 = dir_diaria_limpa / "anomesdia=20261005"
+    arqs_c1 = sorted(pasta_c1.glob("*.parquet"))
+    if arqs_c1:
+        df_c1 = pd.read_parquet(arqs_c1[0])
+        salvar_particao(
+            dir_diaria_limpa,
+            "anomesdia=20261005",
+            df_c1,
+            forcar_reescrita=True,
+            sufixo_semente="-reproc-idempotente",
+        )
+        if verbose:
+            print(
+                "  1. [IDEMPOTENTE] `tabela_particao_diaria/anomesdia=20261005`: "
+                "arquivo Parquet recriado (novo mtime/nome), mas dados 100% idênticos."
+            )
+
+    # 2. Reprocessamento Silencioso de Valores/Domínio em anomesdia=20261010 (mesmas linhas e 0 nulos)
+    pasta_c2 = dir_diaria_limpa / "anomesdia=20261010"
+    arqs_c2 = sorted(pasta_c2.glob("*.parquet"))
+    if arqs_c2:
+        df_c2 = pd.read_parquet(arqs_c2[0]).copy()
+        df_c2.loc[0:19, "valor_transacao"] = (df_c2.loc[0:19, "valor_transacao"] * 1.50).round(2)
+        df_c2.loc[20:29, "status_transacao"] = "ESTORNADA"
+        salvar_particao(
+            dir_diaria_limpa,
+            "anomesdia=20261010",
+            df_c2,
+            forcar_reescrita=True,
+            sufixo_semente="-reproc-mutacao-valores",
+        )
+        if verbose:
+            print(
+                "  2. [MUTAÇÃO SILENCIOSA] `tabela_particao_diaria/anomesdia=20261010`: "
+                "mesmas 303 linhas e 0 nulos, mas soma(valor_transacao) e mix(status_transacao) alterados."
+            )
+
+    # 3. Reprocessamento com Expurgo de Linhas em anomes=202606 (488 -> 476 linhas)
+    pasta_c3 = dir_mensal_limpa / "anomes=202606"
+    arqs_c3 = sorted(pasta_c3.glob("*.parquet"))
+    if arqs_c3:
+        df_c3 = pd.read_parquet(arqs_c3[0]).iloc[:-12].copy().reset_index(drop=True)
+        salvar_particao(
+            dir_mensal_limpa,
+            "anomes=202606",
+            df_c3,
+            forcar_reescrita=True,
+            sufixo_semente="-reproc-expurgo",
+        )
+        if verbose:
+            print(
+                "  3. [EXPURGO NO PASSADO] `tabela_particao_mensal/anomes=202606`: "
+                "removidos 12 registros de safra passada fechada (488 -> 476 linhas)."
+            )
+
+    # 4. Reprocessamento Corretivo em tabela_particao_diaria_anomalias/anomesdia=20261028 (BRONZE -> GOLD)
+    pasta_limpa_28 = dir_diaria_limpa / "anomesdia=20261028"
+    arqs_limpa_28 = sorted(pasta_limpa_28.glob("*.parquet"))
+    if arqs_limpa_28:
+        df_corrigido_28 = pd.read_parquet(arqs_limpa_28[0]).copy()
+        salvar_particao(
+            dir_diaria_anom,
+            "anomesdia=20261028",
+            df_corrigido_28,
+            forcar_reescrita=True,
+            sufixo_semente="-reproc-corretivo",
+        )
+        if verbose:
+            print(
+                "  4. [CORREÇÃO DE QUARENTENA] `tabela_particao_diaria_anomalias/anomesdia=20261028`: "
+                "partição que estava em BRONZE (25 linhas) reprocessada com 299 linhas íntegras."
+            )
 
 
 def main() -> None:
